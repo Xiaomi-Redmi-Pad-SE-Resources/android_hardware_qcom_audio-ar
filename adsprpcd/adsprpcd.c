@@ -35,6 +35,7 @@
 #define VERIFY_EPRINTF ALOGE
 #define VERIFY_IPRINTF ALOGI
 
+#include <string.h>
 #include <stdio.h>
 #include <dlfcn.h>
 #include <unistd.h>
