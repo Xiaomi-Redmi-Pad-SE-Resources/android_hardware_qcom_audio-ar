@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022, 2024, Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -26,6 +25,10 @@
  * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Changes from Qualcomm Innovation Center, Inc. are provided under the following license:
+ * Copyright (c) 2022, 2024, Qualcomm Innovation Center, Inc. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
 #define LOG_TAG "AHAL: AudioVoice"
@@ -38,6 +41,7 @@
 #include "AudioVoice.h"
 #include "PalApi.h"
 #include "AudioCommon.h"
+#include <audio_extn/AudioExtn.h>
 
 #ifndef AUDIO_MODE_CALL_SCREEN
 #define AUDIO_MODE_CALL_SCREEN 4
@@ -389,6 +393,9 @@ int AudioVoice::GetMatchingTxDevices(const std::set<audio_devices_t>& rx_devices
             case AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT:
                 tx_devices.insert(AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET);
                 break;
+            case AUDIO_DEVICE_OUT_BLE_HEADSET:
+                tx_devices.insert(AUDIO_DEVICE_IN_BLE_HEADSET);
+                break;
             case AUDIO_DEVICE_OUT_HEARING_AID:
                 tx_devices.insert(AUDIO_DEVICE_IN_BUILTIN_MIC);
                 break;
@@ -463,8 +470,17 @@ int AudioVoice::RouteStream(const std::set<audio_devices_t>& rx_devices) {
             ret = UpdateCalls(voice_.session);
         }
     } else {
-        //do device switch here
+        // do device switch here
         for (int i = 0; i < max_voice_sessions_; i++) {
+             {
+                /* already in call, and now if BLE is connected send metadata
+                 * so that BLE can be configured for call and then switch to
+                 * BLE device
+                 */
+                updateVoiceMetadataForBT(true);
+                // dont start the call, until we get suspend from BLE
+                std::unique_lock<std::mutex> guard(reconfig_wait_mutex_);
+             }
              ret = VoiceSetDevice(&voice_.session[i]);
              if (ret)
                  AHAL_ERR("Device switch failed for session[%d]", i);
@@ -476,6 +492,17 @@ int AudioVoice::RouteStream(const std::set<audio_devices_t>& rx_devices) {
 exit:
     AHAL_DBG("Exit ret: %d", ret);
     return ret;
+}
+
+bool AudioVoice::get_voice_call_state(audio_mode_t *mode) {
+    int i, ret = 0;
+    *mode = mode_;
+    for (i = 0; i < max_voice_sessions_; i++) {
+        if (voice_.session[i].state.current_ == CALL_ACTIVE) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int AudioVoice::UpdateCallState(uint32_t vsid, int call_state) {
@@ -526,6 +553,12 @@ int AudioVoice::UpdateCalls(voice_session_t *pSession) {
             {
             case CALL_INACTIVE:
                 AHAL_DBG("INACTIVE -> ACTIVE vsid:%x", session->vsid);
+                {
+                    updateVoiceMetadataForBT(true);
+                    // dont start the call, until we get suspend from BLE
+                    std::unique_lock<std::mutex> guard(reconfig_wait_mutex_);
+                }
+
                 ret = VoiceStart(session);
                 if (ret < 0) {
                     AHAL_ERR("VoiceStart() failed");
@@ -551,6 +584,9 @@ int AudioVoice::UpdateCalls(voice_session_t *pSession) {
                 } else {
                     session->state.current_ = session->state.new_;
                 }
+
+                AHAL_DBG("ACTIVE -> INACTIVE update cached meta data");
+                updateVoiceMetadataForBT(false);
                 break;
 
             default:
@@ -682,7 +718,7 @@ int AudioVoice::VoiceStart(voice_session_t *session) {
     streamAttributes.out_media_config.aud_fmt_id = PAL_AUDIO_FMT_PCM_S16_LE; // TODO: need to convert this from output format
 
     /*set custom key for hac mode*/
-    if (session && session->hac && palDevices[1].id == 
+    if (session && session->hac && palDevices[1].id ==
         PAL_DEVICE_OUT_HANDSET) {
         strlcat(palDevices[0].custom_config.custom_key, "HAC;",
                     sizeof(palDevices[0].custom_config.custom_key));
@@ -948,7 +984,7 @@ int AudioVoice::VoiceSetDevice(voice_session_t *session) {
             }
     }
     /*set or remove custom key for hac mode*/
-    if (session && session->hac && palDevices[1].id == 
+    if (session && session->hac && palDevices[1].id ==
         PAL_DEVICE_OUT_HANDSET) {
         strlcat(palDevices[0].custom_config.custom_key, "HAC;",
                     sizeof(palDevices[0].custom_config.custom_key));
@@ -1027,6 +1063,62 @@ int AudioVoice::SetVoiceVolume(float volume) {
     }
     AHAL_DBG("Exit ret: %d", ret);
     return ret;
+}
+
+void AudioVoice::updateVoiceMetadataForBT(bool call_active)
+{
+    ssize_t track_count = 1;
+    std::vector<playback_track_metadata_t> Sourcetracks;
+    std::vector<record_track_metadata_t> Sinktracks;
+    Sourcetracks.resize(track_count);
+    Sinktracks.resize(track_count);
+    int32_t ret = 0;
+
+    AHAL_INFO("track count is %d", track_count);
+
+    source_metadata_t btSourceMetadata;
+    sink_metadata_t btSinkMetadata;
+
+    if (call_active) {
+        btSourceMetadata.track_count = track_count;
+        btSourceMetadata.tracks = Sourcetracks.data();
+
+        btSourceMetadata.tracks->usage = AUDIO_USAGE_VOICE_COMMUNICATION;
+        btSourceMetadata.tracks->content_type = AUDIO_CONTENT_TYPE_SPEECH;
+
+        AHAL_DBG("Source metadata for voice call usage:%d content_type:%d",
+            btSourceMetadata.tracks->usage, btSourceMetadata.tracks->content_type);
+        //Pass the source metadata to PAL
+        pal_set_param(PAL_PARAM_ID_SET_SOURCE_METADATA, (void*)&btSourceMetadata, 0);
+
+        btSinkMetadata.track_count = track_count;
+        btSinkMetadata.tracks = Sinktracks.data();
+
+        btSinkMetadata.tracks->source = AUDIO_SOURCE_VOICE_CALL;
+
+        AHAL_DBG("Sink metadata for voice call source:%d", btSinkMetadata.tracks->source);
+        //Pass the sink metadata to PAL
+        pal_set_param(PAL_PARAM_ID_SET_SINK_METADATA, (void*)&btSinkMetadata, 0);
+    } else {
+
+        /* When voice call ends, we need to restore metadata configuration for
+         * source and sink sessions same as prior to the call. Send source
+         * and sink metadata separately to BT.
+         */
+        if (stream_out_primary_) {
+            ret = stream_out_primary_->SetAggregateSourceMetadata(false);
+            if (ret != 0) {
+                AHAL_ERR("Set PAL_PARAM_ID_SET_SOURCE_METADATA for %d failed", ret);
+            }
+        }
+
+        if (stream_in_primary_) {
+            ret = stream_in_primary_->SetAggregateSinkMetadata(false);
+            if (ret != 0) {
+                AHAL_ERR("Set PAL_PARAM_ID_SET_SINK_METADATA for %d failed", ret);
+            }
+        }
+    }
 }
 
 AudioVoice::AudioVoice() {

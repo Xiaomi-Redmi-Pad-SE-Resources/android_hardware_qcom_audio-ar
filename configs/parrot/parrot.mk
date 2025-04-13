@@ -401,10 +401,6 @@ vendor.audio.flac.sw.decoder.24bit=true
 PRODUCT_VENDOR_PROPERTIES += \
 vendor.audio.hal.boot.timeout.ms=20000
 
-#split a2dp DSP supported encoder list
-PRODUCT_VENDOR_PROPERTIES += \
-persist.vendor.bt.a2dp_offload_cap=sbc-aptx-aptxtws-aptxhd-aac-ldac
-
 # A2DP offload support
 PRODUCT_VENDOR_PROPERTIES += \
 ro.bluetooth.a2dp_offload.supported=true

@@ -119,6 +119,7 @@ static const struct audio_string_to_enum device_in_types[] = {
     AUDIO_MAKE_STRING_FROM_ENUM(AUDIO_DEVICE_IN_LINE),
     AUDIO_MAKE_STRING_FROM_ENUM(AUDIO_DEVICE_IN_SPDIF),
     AUDIO_MAKE_STRING_FROM_ENUM(AUDIO_DEVICE_IN_BLUETOOTH_A2DP),
+    AUDIO_MAKE_STRING_FROM_ENUM(AUDIO_DEVICE_IN_BLE_HEADSET),
     AUDIO_MAKE_STRING_FROM_ENUM(AUDIO_DEVICE_IN_LOOPBACK),
     AUDIO_MAKE_STRING_FROM_ENUM(AUDIO_DEVICE_IN_IP),
     AUDIO_MAKE_STRING_FROM_ENUM(AUDIO_DEVICE_IN_BUS),
@@ -598,6 +599,9 @@ std::shared_ptr<StreamInPrimary> AudioDevice::CreateStreamIn(
     stream_in_list_.push_back(astream);
     in_list_mutex.unlock();
     AHAL_DBG("input stream %d %p",(int)stream_in_list_.size(), stream_in);
+    if (voice_) {
+        voice_->stream_in_primary_ = astream;
+    }
     return astream;
 }
 
@@ -1217,6 +1221,26 @@ std::shared_ptr<StreamOutPrimary> AudioDevice::OutGetStream(audio_io_handle_t ha
     return astream_out;
 }
 
+std::vector<std::shared_ptr<StreamOutPrimary>> AudioDevice::OutGetBLEStreamOutputs() {
+
+   std::shared_ptr<StreamOutPrimary> astream_out;
+   std::vector<std::shared_ptr<StreamOutPrimary>> astream_out_list;
+   audio_stream_out* stream_out = NULL;
+
+   /* In case of dev switch to BLE device, stream is associated with old
+    * device but not the BLE until dev switch process completed. Thus get the all
+    * active output streams.
+    */
+   for (int i = 0; i < stream_out_list_.size(); i++) {
+       stream_out_list_[i]->GetStreamHandle(&stream_out);
+       astream_out = adev_->OutGetStream((audio_stream_t*)stream_out);
+       if (astream_out) {
+           astream_out_list.push_back(astream_out);
+       }
+   }
+   return astream_out_list;
+}
+
 std::shared_ptr<StreamOutPrimary> AudioDevice::OutGetStream(audio_stream_t* stream_out) {
 
     std::shared_ptr<StreamOutPrimary> astream_out;
@@ -1266,6 +1290,26 @@ std::shared_ptr<StreamInPrimary> AudioDevice::InGetStream (audio_stream_t* strea
     in_list_mutex.unlock();
     AHAL_VERBOSE("astream_in(%p)", astream_in->stream_.get());
     return astream_in;
+}
+
+std::vector<std::shared_ptr<StreamInPrimary>> AudioDevice::InGetBLEStreamInputs() {
+
+    std::shared_ptr<StreamInPrimary> astream_in;
+    std::vector<std::shared_ptr<StreamInPrimary>> astream_in_list;
+    audio_stream_in* stream_in = NULL;
+
+   /* In case of dev switch to BLE device, stream is associated with old
+    * device but not the BLE until dev switch process completed. Thus get the all
+    * active input streams.
+    */
+    for (int i = 0; i < stream_in_list_.size(); i++) {
+        stream_in_list_[i]->GetStreamHandle(&stream_in);
+        astream_in = adev_->InGetStream((audio_stream_t*)stream_in);
+        if (astream_in) {
+            astream_in_list.push_back(astream_in);
+        }
+    }
+    return astream_in_list;
 }
 
 int AudioDevice::SetMicMute(bool state) {
@@ -1721,6 +1765,8 @@ int AudioDevice::SetParameters(const char *kvpairs) {
         else
             param_bt_a2dp.a2dp_suspended = false;
 
+        param_bt_a2dp.dev_id = PAL_DEVICE_OUT_BLUETOOTH_A2DP;
+
         AHAL_INFO("BT A2DP Suspended = %s, command received", value);
         ret = pal_set_param(PAL_PARAM_ID_BT_A2DP_SUSPENDED, (void *)&param_bt_a2dp,
                             sizeof(pal_param_bta2dp_t));
@@ -1928,6 +1974,8 @@ int AudioDevice::SetParameters(const char *kvpairs) {
         else
             param_bt_a2dp.a2dp_capture_suspended = false;
 
+        param_bt_a2dp.dev_id = PAL_DEVICE_IN_BLUETOOTH_A2DP;
+
         AHAL_INFO("BT A2DP Capture Suspended = %s, command received", value);
         ret = pal_set_param(PAL_PARAM_ID_BT_A2DP_CAPTURE_SUSPENDED, (void*)&param_bt_a2dp,
             sizeof(pal_param_bta2dp_t));
@@ -2100,6 +2148,8 @@ void AudioDevice::FillAndroidDeviceMap() {
     android_device_map_.insert(std::make_pair(AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET, PAL_DEVICE_OUT_BLUETOOTH_SCO));
     android_device_map_.insert(std::make_pair(AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT, PAL_DEVICE_OUT_BLUETOOTH_SCO));
     android_device_map_.insert(std::make_pair(AUDIO_DEVICE_OUT_BLUETOOTH_A2DP, PAL_DEVICE_OUT_BLUETOOTH_A2DP));
+    android_device_map_.insert(std::make_pair(AUDIO_DEVICE_OUT_BLE_HEADSET, PAL_DEVICE_OUT_BLUETOOTH_BLE));
+    android_device_map_.insert(std::make_pair(AUDIO_DEVICE_OUT_BLE_SPEAKER, PAL_DEVICE_OUT_BLUETOOTH_BLE));
     //android_device_map_.insert(std::make_pair(AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES, PAL_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES));
     //android_device_map_.insert(std::make_pair(AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER, PAL_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER));
     android_device_map_.insert(std::make_pair(AUDIO_DEVICE_OUT_AUX_DIGITAL, PAL_DEVICE_OUT_AUX_DIGITAL));
@@ -2145,6 +2195,7 @@ void AudioDevice::FillAndroidDeviceMap() {
     android_device_map_.insert(std::make_pair(AUDIO_DEVICE_IN_LINE, PAL_DEVICE_IN_LINE));
     android_device_map_.insert(std::make_pair(AUDIO_DEVICE_IN_SPDIF, PAL_DEVICE_IN_SPDIF));
     android_device_map_.insert(std::make_pair(AUDIO_DEVICE_IN_BLUETOOTH_A2DP, PAL_DEVICE_IN_BLUETOOTH_A2DP));
+    android_device_map_.insert(std::make_pair(AUDIO_DEVICE_IN_BLE_HEADSET, PAL_DEVICE_IN_BLUETOOTH_BLE));
     //android_device_map_.insert(std::make_pair(AUDIO_DEVICE_IN_LOOPBACK, PAL_DEVICE_IN_LOOPBACK);
     //android_device_map_.insert(std::make_pair(AUDIO_DEVICE_IN_IP, PAL_DEVICE_IN_IP);
     //android_device_map_.insert(std::make_pair(AUDIO_DEVICE_IN_BUS, PAL_DEVICE_IN_BUS);

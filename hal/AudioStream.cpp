@@ -731,8 +731,8 @@ static uint32_t astream_get_latency(const struct audio_stream_out *stream) {
     pal_param_bta2dp_t *param_bt_a2dp = NULL;
     size_t size = 0;
     int32_t ret;
-
-    if (astream_out->isDeviceAvailable(PAL_DEVICE_OUT_BLUETOOTH_A2DP)) {
+    //TODO : check on PAL_PARAM_ID_BT_A2DP_ENCODER_LATENCY for BLE
+    if ((astream_out->isDeviceAvailable(PAL_DEVICE_OUT_BLUETOOTH_A2DP)) || (astream_out->isDeviceAvailable(PAL_DEVICE_OUT_BLUETOOTH_BLE))) {
         ret = pal_get_param(PAL_PARAM_ID_BT_A2DP_ENCODER_LATENCY,
                             (void **)&param_bt_a2dp, &size, nullptr);
         if (!ret && param_bt_a2dp)
@@ -963,6 +963,79 @@ static int astream_out_set_volume(struct audio_stream_out *stream,
     } else {
         AHAL_ERR("unable to get audio stream");
         return -EINVAL;
+    }
+}
+
+static void out_update_source_metadata_v7(
+                                struct audio_stream_out *stream,
+                                const struct source_metadata_v7 *source_metadata) {
+
+    int32_t ret = 0;
+    if (stream == NULL
+            || (source_metadata == NULL)) {
+        AHAL_ERR("%s: stream or source_metadata is NULL", __func__);
+        return;
+    }
+
+    std::shared_ptr<AudioDevice> adevice = AudioDevice::GetInstance();
+    std::shared_ptr<StreamOutPrimary> astream_out;
+
+    if (adevice) {
+        astream_out = adevice->OutGetStream((audio_stream_t*)stream);
+    }
+
+    if (astream_out) {
+        ssize_t track_count = source_metadata->track_count;
+        struct playback_track_metadata_v7* track = source_metadata->tracks;
+        astream_out->tracks.resize(track_count);
+
+        AHAL_VERBOSE("track count is %d",track_count);
+
+        astream_out->btSourceMetadata.track_count = track_count;
+        astream_out->btSourceMetadata.tracks = astream_out->tracks.data();
+        audio_mode_t mode;
+        bool voice_active = false;
+
+        if (adevice && adevice->voice_) {
+            voice_active = adevice->voice_->get_voice_call_state(&mode);
+        } else {
+            AHAL_ERR("adevice voice is null");
+        }
+
+        // copy all tracks info from source_metadata_v7 to source_metadata per stream basis
+        while (track_count && track) {
+            /* currently after cs call ends, we are getting metadata as
+             * usage voice and content speech, this is causing BT to again
+             * open call session, so added below check to send metadata of
+             * voice only if call is active, else discard it
+             */
+            if (!voice_active && mode != AUDIO_MODE_IN_COMMUNICATION &&
+                track->base.usage == AUDIO_USAGE_VOICE_COMMUNICATION &&
+                track->base.content_type == AUDIO_CONTENT_TYPE_SPEECH) {
+                AHAL_ERR("Unwanted track removed from the list");
+                astream_out->btSourceMetadata.track_count--;
+                --track_count;
+                ++track;
+            } else {
+                astream_out->btSourceMetadata.tracks->usage = track->base.usage;
+                astream_out->btSourceMetadata.tracks->content_type = track->base.content_type;
+                AHAL_DBG("Source metadata usage:%d content_type:%d",
+                    astream_out->btSourceMetadata.tracks->usage,
+                    astream_out->btSourceMetadata.tracks->content_type);
+                --track_count;
+                ++track;
+                ++astream_out->btSourceMetadata.tracks;
+            }
+        }
+
+        // move pointer to base address and do setparam
+        astream_out->btSourceMetadata.tracks = astream_out->tracks.data();
+
+        //Send aggregated metadata of all active stream o/ps
+        ret = astream_out->SetAggregateSourceMetadata(voice_active);
+        if (ret != 0) {
+            AHAL_ERR("Set PAL_PARAM_ID_SET_SOURCE_METADATA for %d failed", ret);
+        }
     }
 }
 
@@ -1247,7 +1320,8 @@ uint64_t StreamInPrimary::GetFramesRead(int64_t* time)
     size_t size = 0;
     int32_t ret;
 
-    if (isDeviceAvailable(PAL_DEVICE_IN_BLUETOOTH_A2DP)) {
+    if (isDeviceAvailable(PAL_DEVICE_IN_BLUETOOTH_A2DP) ||
+        isDeviceAvailable(PAL_DEVICE_IN_BLUETOOTH_BLE)) {
         ret = pal_get_param(PAL_PARAM_ID_BT_A2DP_DECODER_LATENCY,
             (void**)&param_bt_a2dp, &size, nullptr);
         if (!ret && param_bt_a2dp) {
@@ -1302,6 +1376,7 @@ static void in_update_sink_metadata_v7(
     }
     audio_devices_t device = sink_metadata->tracks->base.dest_device;
     std::shared_ptr<AudioDevice> adevice = AudioDevice::GetInstance();
+    std::shared_ptr<StreamInPrimary> astream_in;
     int ret = 0;
 
 
@@ -1318,6 +1393,55 @@ static void in_update_sink_metadata_v7(
             AHAL_ERR("%s: voice handle does not exist", __func__);
         }
     }
+
+    if (adevice) {
+        astream_in = adevice->InGetStream((audio_stream_t*)stream);
+
+    if (astream_in) {
+       ssize_t track_count = sink_metadata->track_count;
+       struct record_track_metadata_v7* track = sink_metadata->tracks;
+       AHAL_DBG("track count is %d with channel_mask %d",track_count, track->channel_mask);
+       audio_mode_t mode;
+       bool voice_active = false;
+
+       /* When BLE gets connected, adev_input_stream opens from mixports capabilities. In this
+        * case channel mask is set to "0" by FWK whereas when actual usecase starts,
+        * audioflinger updates the channel mask in updateSinkMetadata as a part of capture
+        * track. Thus channel mask value is checked here to avoid sending unnecessary sink
+        * metadata BT HAL
+        */
+       if (track->channel_mask == 0) return;
+
+       astream_in->tracks.resize(track_count);
+
+       astream_in->btSinkMetadata.track_count = track_count;
+       astream_in->btSinkMetadata.tracks = astream_in->tracks.data();
+
+       if (adevice && adevice->voice_) {
+           voice_active = adevice->voice_->get_voice_call_state(&mode);
+       } else {
+           AHAL_ERR("adevice voice is null");
+       }
+
+       // copy all tracks info from sink_metadata_v7 to sink_metadata per stream basis
+       while (track_count && track) {
+           astream_in->btSinkMetadata.tracks->source = track->base.source;
+           AHAL_DBG("Sink metadata source:%d", astream_in->btSinkMetadata.tracks->source);
+           --track_count;
+           ++track;
+           ++astream_in->btSinkMetadata.tracks;
+       }
+
+       astream_in->btSinkMetadata.tracks = astream_in->tracks.data();
+
+       //Send aggregated metadata of all active stream i/ps
+       ret = astream_in->SetAggregateSinkMetadata(voice_active);
+
+       if (ret != 0) {
+           AHAL_ERR("Set PAL_PARAM_ID_SET_SINK_METADATA for %d failed", ret);
+       }
+    }
+  }
 }
 
 static int astream_in_get_active_microphones(
@@ -1777,6 +1901,7 @@ int StreamOutPrimary::FillHalFnPtrs() {
     stream_.get()->drain = astream_drain;
     stream_.get()->flush = astream_flush;
     stream_.get()->set_callback = astream_set_callback;
+    stream_.get()->update_source_metadata_v7 = out_update_source_metadata_v7;
     return ret;
 }
 
@@ -2506,7 +2631,7 @@ uint64_t StreamOutPrimary::GetFramesWritten(struct timespec *timestamp)
 
     // Adjustment accounts for A2dp encoder latency with non offload usecases
     // Note: Encoder latency is returned in ms, while platform_render_latency in us.
-    if (isDeviceAvailable(PAL_DEVICE_OUT_BLUETOOTH_A2DP)) {
+    if (isDeviceAvailable(PAL_DEVICE_OUT_BLUETOOTH_A2DP) || isDeviceAvailable(PAL_DEVICE_OUT_BLUETOOTH_BLE)) {
         ret = pal_get_param(PAL_PARAM_ID_BT_A2DP_ENCODER_LATENCY,
                             (void **)&param_bt_a2dp, &size, nullptr);
         if (!ret && param_bt_a2dp) {
@@ -3014,7 +3139,7 @@ int StreamOutPrimary::GetFrames(uint64_t *frames)
 
     // Adjustment accounts for A2dp encoder latency with offload usecases
     // Note: Encoder latency is returned in ms.
-    if (isDeviceAvailable(PAL_DEVICE_OUT_BLUETOOTH_A2DP)) {
+    if (isDeviceAvailable(PAL_DEVICE_OUT_BLUETOOTH_A2DP) || isDeviceAvailable(PAL_DEVICE_OUT_BLUETOOTH_BLE)) {
         ret = pal_get_param(PAL_PARAM_ID_BT_A2DP_ENCODER_LATENCY,
                             (void **)&param_bt_a2dp, &size, nullptr);
         if (!ret && param_bt_a2dp) {
@@ -3394,6 +3519,55 @@ int StreamOutPrimary::StopOffloadVisualizer(
     } else {
         AHAL_ERR("function pointer is null.");
         return -EINVAL;
+    }
+
+    return ret;
+}
+
+int StreamOutPrimary::SetAggregateSourceMetadata(bool voice_active) {
+    ssize_t track_count_total = 0;
+    std::vector<playback_track_metadata_t> total_tracks;
+    source_metadata_t btSourceMetadata;
+    int32_t ret = 0;
+
+    std::shared_ptr<AudioDevice> adevice = AudioDevice::GetInstance();
+
+    /* During an active voice call, if new media/game session is launched APM sends
+     * source metadata to AHAL, in that case don't send it
+     * to BT as it may be misinterpreted as reconfig.
+     */
+    if (!voice_active) {
+        //Get stream o/p list
+        std::vector<std::shared_ptr<StreamOutPrimary>> astream_out_list = adevice->OutGetBLEStreamOutputs();
+        for (int i = 0; i < astream_out_list.size(); i++) {
+            //total tracks on stream o/ps
+            track_count_total += astream_out_list[i]->btSourceMetadata.track_count;
+        }
+
+        total_tracks.resize(track_count_total);
+        btSourceMetadata.track_count = track_count_total;
+        btSourceMetadata.tracks = total_tracks.data();
+
+        //Get the metadata of all tracks on different stream o/ps
+        for (int i = 0; i < astream_out_list.size(); i++) {
+            struct playback_track_metadata* track = astream_out_list[i]->btSourceMetadata.tracks;
+            ssize_t track_count = astream_out_list[i]->btSourceMetadata.track_count;
+            while (track_count && track) {
+                btSourceMetadata.tracks->usage = track->usage;
+                btSourceMetadata.tracks->content_type = track->content_type;
+                AHAL_DBG("Agreegated Source metadata usage:%d content_type:%d",
+                    btSourceMetadata.tracks->usage,
+                    btSourceMetadata.tracks->content_type);
+                --track_count;
+                ++track;
+                ++btSourceMetadata.tracks;
+            }
+        }
+        btSourceMetadata.tracks = total_tracks.data();
+
+        // pass the metadata to PAL
+        ret = pal_set_param(PAL_PARAM_ID_SET_SOURCE_METADATA,
+            (void*)&btSourceMetadata, 0);
     }
 
     return ret;
@@ -3993,6 +4167,52 @@ int StreamInPrimary::SetGain(float gain) {
 done:
     stream_mutex_.unlock();
     AHAL_DBG("Exit ret: %d", ret);
+    return ret;
+}
+
+int StreamInPrimary::SetAggregateSinkMetadata(bool voice_active) {
+    ssize_t track_count_total = 0;
+    std::vector<record_track_metadata_t> total_tracks;
+    sink_metadata_t btSinkMetadata;
+    int32_t ret = 0;
+
+    std::shared_ptr<AudioDevice> adevice = AudioDevice::GetInstance();
+
+    /* During an active voice call, if new record/vbc session is launched APM sends
+     * sink metadata to AHAL, in that case don't send it
+     * to BT as it may be misinterpreted as reconfig.
+     */
+    if (!voice_active) {
+        //Get stream i/p list
+        std::vector<std::shared_ptr<StreamInPrimary>> astream_in_list = adevice->InGetBLEStreamInputs();
+        for (int i = 0; i < astream_in_list.size(); i++) {
+            //total tracks on stream i/ps
+            track_count_total += astream_in_list[i]->btSinkMetadata.track_count;
+        }
+
+        total_tracks.resize(track_count_total);
+        btSinkMetadata.track_count = track_count_total;
+        btSinkMetadata.tracks = total_tracks.data();
+
+        //Get the metadata of all tracks on different stream i/ps
+        for (int i = 0; i < astream_in_list.size(); i++) {
+            struct record_track_metadata* track = astream_in_list[i]->btSinkMetadata.tracks;
+            ssize_t track_count = astream_in_list[i]->btSinkMetadata.track_count;
+            while (track_count && track) {
+                btSinkMetadata.tracks->source = track->source;
+                AHAL_DBG("Aggregated Sink metadata source:%d", btSinkMetadata.tracks->source);
+                --track_count;
+                ++track;
+                ++btSinkMetadata.tracks;
+            }
+        }
+        btSinkMetadata.tracks = total_tracks.data();
+
+        // pass the metadata to PAL
+        ret = pal_set_param(PAL_PARAM_ID_SET_SINK_METADATA,
+            (void*)&btSinkMetadata, 0);
+    }
+
     return ret;
 }
 

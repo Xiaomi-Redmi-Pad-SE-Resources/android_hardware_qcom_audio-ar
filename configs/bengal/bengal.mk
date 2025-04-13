@@ -160,8 +160,10 @@ PRODUCT_PACKAGES += ftm_test_config_bengal-qrd-snd-card
 PRODUCT_PACKAGES += ftm_test_config_bengal-idp-snd-card
 PRODUCT_PACKAGES += ftm_test_config_bengal-scubaidp-snd-card
 PRODUCT_PACKAGES += ftm_test_config_bengal-scubaqrd-snd-card
+ifneq ($(TARGET_HAS_QTI_OPTIMIZATIONS), true)
 PRODUCT_PACKAGES += audioadsprpcd
 PRODUCT_PACKAGES += vendor.qti.audio-adsprpc-service.rc
+endif
 ifneq ($(TARGET_BOARD_SUFFIX),_515_32go)
 PRODUCT_PACKAGES += android.hardware.audio.service_64
 PRODUCT_PACKAGES += android.hardware.audio.service_64.rc
@@ -173,10 +175,18 @@ PRODUCT_PACKAGES += MTP_acdb_cal.acdb
 PRODUCT_PACKAGES += MTP_workspaceFileXml.qwsp
 PRODUCT_PACKAGES += IDP_acdb_cal.acdb
 PRODUCT_PACKAGES += IDP_workspaceFileXml.qwsp
+ifeq ($(TARGET_HAS_QTI_OPTIMIZATIONS), true)
+PRODUCT_PACKAGES += IDP_qti_optimized_acdb_cal.acdb
+PRODUCT_PACKAGES += IDP_qti_optimized_workspaceFileXml.qwsp
+endif
 PRODUCT_PACKAGES += QRD_acdb_cal.acdb
 PRODUCT_PACKAGES += QRD_workspaceFileXml.qwsp
 PRODUCT_PACKAGES += IDP_scuba_acdb_cal.acdb
 PRODUCT_PACKAGES += IDP_scuba_workspaceFileXml.qwsp
+ifeq ($(TARGET_HAS_QTI_OPTIMIZATIONS), true)
+PRODUCT_PACKAGES += IDP_scuba_qti_optimized_acdb_cal.acdb
+PRODUCT_PACKAGES += IDP_scuba_qti_optimized_workspaceFileXml.qwsp
+endif
 PRODUCT_PACKAGES += QRD_scuba_acdb_cal.acdb
 PRODUCT_PACKAGES += QRD_scuba_workspaceFileXml.qwsp
 PRODUCT_PACKAGES += fai_3.0.0_0.0_eai_1.00.pmd
